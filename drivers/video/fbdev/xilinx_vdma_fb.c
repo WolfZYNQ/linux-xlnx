@@ -25,19 +25,18 @@ typedef struct {
 	u32 vpe;         /* End time of Vertical sync pulse, in lines (active height + V. front porch + V. sync width) */
 	u32 hmax; 		 /* Total number of pixel clocks per line (active width + H. front porch + H. sync width + H. back porch) */
 	u32 vmax; 		 /* Total number of lines per frame (active height + V. front porch + V. sync width + V. back porch) */
-	double freq; 	 /* Pixel Clock frequency */
+	long freq; 	 /* Pixel Clock frequency */
 } s_vtcParameter;
 
 static const s_vtcParameter vtc_parameter[] =
 {
-	{ "640x480@60Hz", 	640, 	480, 	656, 	752,	489, 	491,  	800,  	525, 	25.0 },
-	{ "800x600@60Hz", 	800, 	600, 	840, 	968, 	600, 	604,  	1056, 	628, 	40.0 },
-	{ "1280x720@60Hz", 	1280, 	720, 	1390, 	1430, 	724, 	729,  	1650, 	750, 	74.25 },
-	{ "1280x1024@60Hz", 1280, 	1024, 	1328, 	1440, 	1024, 	1027, 	1688, 	1065, 	108.0 },
-	{ "1920x1080@60Hz", 1920, 	1080, 	2008, 	2052, 	1083, 	1088, 	2200, 	1125, 	148.5 },
+	{ "640x480@60Hz", 	640, 	480, 	656, 	752,	489, 	491,  	800,  	525, 	25000000 },
+	{ "800x600@60Hz", 	800, 	600, 	840, 	968, 	600, 	604,  	1056, 	628, 	40000000 },
+	{ "1280x720@60Hz", 	1280, 	720, 	1390, 	1430, 	724, 	729,  	1650, 	750, 	74250000 },
+	{ "1280x1024@60Hz", 1280, 	1024, 	1328, 	1440, 	1024, 	1027, 	1688, 	1065, 	108000000 },
+	{ "1920x1080@60Hz", 1920, 	1080, 	2008, 	2052, 	1083, 	1088, 	2200, 	1125, 	148500000 },
+	{ NULL },
 };
-
-#define DYNCLK_RATE 148500000
 
 #define BITS_PER_PIXEL 32	/*color deepth of the screen*/
 #define RED_SHIFT	16
@@ -55,15 +54,7 @@ struct xilinx_vdma_fb_conf
 {
 	uint32_t resolution_height;
 	uint32_t resolution_width;
-};
-
-/**
- * default parameters of screen
- */
-static struct xilinx_vdma_fb_conf xilinx_vdma_fb_default_conf =
-{
-	.resolution_height = 1080,
-	.resolution_width = 1920
+	int vtc_parameter_index;
 };
 
 struct xilinx_vdma_fb_drvdata
@@ -326,7 +317,7 @@ static int dynclk_init(struct platform_device *pdev)
 	}
 	current_clk = clk_get_rate(drvdata->dyn_clk);
 	dev_dbg(&pdev->dev, "current clk rate: %lu\r\n", current_clk);
-	set_clk = clk_round_rate(drvdata->dyn_clk, DYNCLK_RATE);
+	set_clk = clk_round_rate(drvdata->dyn_clk, vtc_parameter[drvdata->fb_conf.vtc_parameter_index].freq);
 	if(clk_set_rate(drvdata->dyn_clk, set_clk) != 0)
 	{
 		dev_err(&pdev->dev, "clk_set_rate failed!\r\n");
@@ -368,6 +359,51 @@ static int xvtc_init(struct platform_device *pdev)
 	return 0;
 }
 
+static int of_parse(struct platform_device *pdev)
+{
+	struct xilinx_vdma_fb_drvdata *drvdata;
+	int err = 0, i = 0;
+	char err_buf[128] = {0};
+	drvdata = platform_get_drvdata(pdev);
+	if(!drvdata)
+	{
+		dev_err(&pdev->dev, "platform_get_drvdata failed!\r\n");
+		return -1;
+	}
+	err = of_property_read_u32_index(pdev->dev.of_node, "width",0, &drvdata->fb_conf.resolution_width);
+	if(err < 0)
+	{
+		dev_err(&pdev->dev, "get width failed! Please check your device tree\r\n");
+		return -1;
+	}
+	err = of_property_read_u32_index(pdev->dev.of_node, "height",0, &drvdata->fb_conf.resolution_height);
+	if(err < 0)
+	{
+		dev_err(&pdev->dev, "get height failed! Please check your device tree\r\n"); 
+		return -1;
+	}
+	for(i = 0; i <= 4; i++)
+	{
+		if((drvdata->fb_conf.resolution_height == vtc_parameter[i].height)
+			&& (drvdata->fb_conf.resolution_width == vtc_parameter[i].width)) 
+		{
+			dev_dbg(&pdev->dev, "Resolution:%s\n", vtc_parameter[i].label);
+			drvdata->fb_conf.vtc_parameter_index = i;
+			break;
+		}
+	}
+	if(i > 4)
+	{
+		for(i = 0; vtc_parameter[i].label != NULL; i++)
+		{
+			strcat(err_buf, vtc_parameter[i].label);
+			strcat(err_buf, ","); 
+		}
+		dev_err(&pdev->dev, "Only support following resolution:%s\r\n", err_buf);
+		return -1;
+	}
+	return 0;
+}
 
 static int xilinx_vdma_fb_probe(struct platform_device *pdev)
 {
@@ -380,9 +416,14 @@ static int xilinx_vdma_fb_probe(struct platform_device *pdev)
 	if(!drvdata)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, drvdata);
-	/*todo: read parameter from probe*/
 
-	drvdata->fb_conf = xilinx_vdma_fb_default_conf;
+	/*parse device tree parameter*/
+	if(of_parse(pdev) < 0 )
+	{
+		dev_err(&pdev->dev, "of_parse failed\n");
+	}
+	else
+		dev_dbg(&pdev->dev, "of_parse ok!\n");
 
 	/*init clk*/
 	if(dynclk_init(pdev) < 0)
@@ -436,10 +477,10 @@ error:
 static int xilinx_vdma_fb_remove(struct platform_device *pdev)
 {
 	struct xilinx_vdma_fb_drvdata* drvdata = platform_get_drvdata(pdev); 
-	struct xilinx_vdma_fb_conf fb_conf = xilinx_vdma_fb_default_conf;
+
 	unregister_framebuffer(&drvdata->info);
 	fb_dealloc_cmap(&drvdata->info.cmap); 
-	dma_free_coherent(&pdev->dev, PAGE_ALIGN(fb_conf.resolution_height * fb_conf.resolution_width * BITS_PER_PIXEL / 8),
+	dma_free_coherent(&pdev->dev, PAGE_ALIGN(drvdata->fb_conf.resolution_height * drvdata->fb_conf.resolution_width * BITS_PER_PIXEL / 8),
 		drvdata->fb_virtual, drvdata->fb_phy);
 	dma_release_channel(drvdata->mm2s_dma_chan);
 	return 0;
